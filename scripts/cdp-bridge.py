@@ -26,16 +26,23 @@ import base64
 # Config
 PROXY_PORT = int(os.environ.get('CDP_PROXY_PORT', '3456'))
 
-# Auto-detect Windows gateway IP from WSL2
-# Hermes Agent runs in WSL2, Chrome runs on Windows
-try:
-    import subprocess
-    result = subprocess.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True, timeout=5)
-    CHROME_HOST = result.stdout.strip().split()[-1] if result.stdout.strip() else '127.0.0.1'
-except:
+# Auto-detect Chrome CDP host
+# Linux/macOS: Chrome is local → 127.0.0.1:9222
+# Windows (WSL2): Chrome is on Windows host → <gateway>:9223
+if os.environ.get('CHROME_HOST'):
+    CHROME_HOST = os.environ['CHROME_HOST']
+elif os.path.exists('/proc/version') and 'microsoft' in open('/proc/version').read().lower():
+    # WSL2 — get Windows gateway IP
+    try:
+        import subprocess
+        result = subprocess.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True, timeout=5)
+        CHROME_HOST = result.stdout.strip().split()[-1] if result.stdout.strip() else '127.0.0.1'
+    except:
+        CHROME_HOST = '127.0.0.1'
+    CHROME_PORT = int(os.environ.get('CHROME_PORT', '9223'))
+else:
     CHROME_HOST = '127.0.0.1'
-
-CHROME_PORT = int(os.environ.get('CHROME_PORT', '9223'))
+    CHROME_PORT = int(os.environ.get('CHROME_PORT', '9222'))
 
 # CDP session management
 _cmd_id = 0

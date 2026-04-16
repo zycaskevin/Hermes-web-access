@@ -2,7 +2,7 @@
 
 > **Hermes Agent 原生聯網技能** — Fork from [eze-is/web-access](https://github.com/eze-is/web-access) v2.4.3
 
-給 Hermes Agent 裝上完整瀏覽器自動化能力。基於上游的瀏覽哲學與 CDP 架構，重寫後端為 Python，原生解決 WSL2 環境下 Chrome CDP 橋接問題。
+給 Hermes Agent 裝上完整瀏覽器自動化能力。基於上游的瀏覽哲學與 CDP 架構，重寫後端為 Python，原生解決 WSL2 橋接問題。
 
 ## 與上游的差異
 
@@ -17,7 +17,13 @@
 
 ## 架構
 
-Hermes Agent 跑在 WSL2，Chrome 跑在 Windows。WSL2 無法直連 Windows localhost，需三層橋接：
+### Linux / macOS（單層）
+
+```
+Hermes Agent → cdp-bridge.py (:3456) → Chrome CDP (:9222)
+```
+
+### Windows via WSL2（三層橋接）
 
 ```
 ┌─────────────┐     HTTP/WS      ┌──────────────┐     TCP      ┌─────────────┐     HTTP/WS     ┌─────────┐
@@ -26,6 +32,7 @@ Hermes Agent 跑在 WSL2，Chrome 跑在 Windows。WSL2 無法直連 Windows loc
 └─────────────┘                  └──────────────┘              └─────────────┘                  └─────────┘
 ```
 
+WSL2 無法直連 Windows localhost，需三層橋接：
 1. **Chrome** — `--remote-debugging-port=9222` 監聽 `127.0.0.1:9222`
 2. **tcp-proxy.js** — Windows TCP 轉發 `0.0.0.0:9223 → 127.0.0.1:9222`
 3. **cdp-bridge.py** — WSL HTTP/WS Proxy `0.0.0.0:3456 → <gateway>:9223`
@@ -40,39 +47,49 @@ git clone https://github.com/zycaskevin/Hermes-web-access ~/.hermes/skills/web-a
 
 # 安裝 Python 依賴
 pip install aiohttp
+```
 
+**Windows (WSL2) 額外步驟：**
+```bash
 # 將 Windows 腳本複製到桌面
 cp ~/.hermes/skills/web-access/windows/* /mnt/c/Users/<YourUsername>/Desktop/
 ```
 
 ## 啟動
 
-### 1. Windows 端
+### Linux / macOS
 
-雙擊桌面 `start_chrome_cdp.bat` — 自動完成：
-- 終止所有 Chrome 進程
-- 以 CDP 模式啟動 Chrome（獨立 profile，不影響日常瀏覽）
-- 啟動 TCP Proxy
-
-### 2. WSL 端
-
+確保 Chrome 以 CDP 模式啟動，然後：
 ```bash
-~/.hermes/skills/web-access/scripts/cdp-bridge.sh start    # 啟動
-~/.hermes/skills/web-access/scripts/cdp-bridge.sh stop     # 停止
-~/.hermes/skills/web-access/scripts/cdp-bridge.sh status   # 狀態
-~/.hermes/skills/web-access/scripts/cdp-bridge.sh restart  # 重啟
+~/.hermes/skills/web-access/scripts/cdp-bridge.sh start
 ```
 
-### 開機自啟
+### Windows (WSL2)
 
-將 `windows/tcp-proxy.vbs` 放入 Windows 啟動資料夾：
+1. 雙擊桌面 `start_chrome_cdp.bat` — 自动：
+   - 終止所有 Chrome 進程
+   - 以 CDP 模式啟動 Chrome（獨立 profile，不影響日常瀏覽）
+   - 啟動 TCP Proxy
+2. WSL 內執行：
+```bash
+~/.hermes/skills/web-access/scripts/cdp-bridge.sh start
+```
+
+### 管理命令
+
+```bash
+cdp-bridge.sh start     # 啟動
+cdp-bridge.sh stop      # 停止
+cdp-bridge.sh status    # 狀態
+cdp-bridge.sh restart   # 重啟
+```
+
+### 開機自啟（Windows）
+
+將 `windows/tcp-proxy.vbs` 放入：
 ```
 %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
 ```
-
-## Chrome CDP 注意事項
-
-Chrome 147+ 的 `--remote-debugging-port` 必須先終止所有 Chrome 進程才能生效。使用獨立 profile (`cdp-chrome-profile`) 避免影響日常 Chrome。這些已整合進 `start_chrome_cdp.bat`。
 
 ## CDP Bridge API
 

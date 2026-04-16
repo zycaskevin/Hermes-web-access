@@ -6,9 +6,18 @@ CDP_BRIDGE_PIDFILE="/tmp/cdp-bridge.pid"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CDP_BRIDGE_SCRIPT="$SCRIPT_DIR/cdp-bridge.py"
 
-# Auto-detect Windows gateway IP (Hermes = WSL2, Chrome = Windows)
-GATEWAY_IP=$(ip route show default 2>/dev/null | grep -oP 'via \K[\d.]+')
-GATEWAY_IP=${GATEWAY_IP:-127.0.0.1}
+# Auto-detect environment
+# Linux/macOS: Chrome is local → 127.0.0.1:9222
+# Windows (WSL2): Chrome is on Windows host → <gateway>:9223
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    GATEWAY_IP=$(ip route show default 2>/dev/null | grep -oP 'via \K[\d.]+')
+    GATEWAY_IP=${GATEWAY_IP:-127.0.0.1}
+    DEFAULT_CHROME_HOST="$GATEWAY_IP"
+    DEFAULT_CHROME_PORT="9223"
+else
+    DEFAULT_CHROME_HOST="127.0.0.1"
+    DEFAULT_CHROME_PORT="9222"
+fi
 
 start() {
     if [ -f "$CDP_BRIDGE_PIDFILE" ] && kill -0 "$(cat "$CDP_BRIDGE_PIDFILE")" 2>/dev/null; then
@@ -16,8 +25,8 @@ start() {
         return 0
     fi
     
-    export CHROME_HOST="${CHROME_HOST:-$GATEWAY_IP}"
-    export CHROME_PORT="${CHROME_PORT:-9223}"
+    export CHROME_HOST="${CHROME_HOST:-$DEFAULT_CHROME_HOST}"
+    export CHROME_PORT="${CHROME_PORT:-$DEFAULT_CHROME_PORT}"
     export CDP_PROXY_PORT="${CDP_PROXY_PORT:-3456}"
     
     echo "Chrome at $CHROME_HOST:$CHROME_PORT → Bridge on :$CDP_PROXY_PORT"
