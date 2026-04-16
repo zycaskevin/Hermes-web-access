@@ -1,13 +1,13 @@
 ---
 name: web-access
 license: MIT
-github: https://github.com/arthur-liao/web-access-hp
+github: https://github.com/zycaskevin/Hermes-web-access
 description:
   Hermes Agent 專用聯網技能 — 搜索、抓取、CDP 瀏覽器自動化、站點經驗積累。
   觸發場景：搜索資訊、查看網頁、訪問需登入的網站、操作網頁界面、抓取社群內容、讀取動態渲染頁面。
   Fork from eze-is/web-access，以 Python CDP Bridge 取代 Node.js 後端，原生支援 WSL2。
 metadata:
-  author: Arthur Liao
+  author: zycaskevin
   upstream_author: 一泽Eze
   version: "1.0.0-hp"
   upstream_version: "2.4.3"
@@ -198,7 +198,7 @@ Hermes (WSL) → cdp-bridge.py (:3456) → tcp-proxy.js (:9223, Windows) → Chr
 2. WSL: `cdp-bridge.sh start`
 
 **環境變量**：
-- `CHROME_HOST`：Chrome CDP 地址（WSL2 默認 `172.29.16.1`，原生 `127.0.0.1`）
+- `CHROME_HOST`：Chrome CDP 地址（WSL2 自動偵測 gateway IP，原生 `127.0.0.1`）
 - `CHROME_PORT`：Chrome CDP 端口（WSL2 預設 `9223`，原生 `9222`）
 - `CDP_PROXY_PORT`：Bridge 監聽端口（預設 `3456`）
 

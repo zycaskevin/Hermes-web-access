@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""WSL-to-Windows CDP Bridge - Full Chrome DevTools Protocol proxy for web-access skill.
+"""WSL-to-Windows CDP Bridge - Full Chrome DevTools Protocol proxy for Hermes Agent.
 Bridges all CDP operations from WSL to Windows Chrome via TCP proxy.
 
 Usage:
-  CHROME_HOST=172.29.16.1 CHROME_PORT=9223 CDP_PROXY_PORT=3456 python3 cdp-bridge.py
+  # WSL2 (auto-detected):
+  python3 cdp-bridge.py
+  
+  # Native Linux/macOS:
+  CHROME_HOST=127.0.0.1 CHROME_PORT=9222 python3 cdp-bridge.py
 
-Architecture:
-  WSL Agent → localhost:3456 (this bridge) → 172.29.16.1:9223 (Windows tcp-proxy.js) → 127.0.0.1:9222 (Chrome CDP)
+Architecture (WSL2):
+  WSL Agent → localhost:3456 (this bridge) → <gateway>:9223 (Windows tcp-proxy.js) → 127.0.0.1:9222 (Chrome CDP)
+
+Architecture (Native):
+  Agent → localhost:3456 (this bridge) → 127.0.0.1:9222 (Chrome CDP)
 """
 import asyncio
 import aiohttp
@@ -29,9 +36,9 @@ elif os.path.exists('/proc/version') and 'microsoft' in open('/proc/version').re
     try:
         import subprocess
         result = subprocess.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True, timeout=5)
-        CHROME_HOST = result.stdout.strip().split()[-1] if result.stdout.strip() else '172.29.16.1'
+        CHROME_HOST = result.stdout.strip().split()[-1] if result.stdout.strip() else '127.0.0.1'
     except:
-        CHROME_HOST = '172.29.16.1'
+        CHROME_HOST = '127.0.0.1'
 else:
     CHROME_HOST = '127.0.0.1'
 

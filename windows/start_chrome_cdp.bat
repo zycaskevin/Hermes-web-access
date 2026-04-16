@@ -9,13 +9,13 @@ taskkill /F /IM chrome.exe >nul 2>&1
 timeout /t 3 /nobreak >nul
 
 echo [2/3] 啟動 Chrome（CDP 模式）...
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=C:\Users\User\cdp-chrome-profile
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=%USERPROFILE%\cdp-chrome-profile
 
 echo 等待 Chrome 啟動...
 timeout /t 5 /nobreak >nul
 
 echo [3/3] 啟動 TCP Proxy（讓 WSL 可訪問）...
-start /min node "C:\Users\User\OneDrive\Desktop\tcp-proxy.js"
+start /min node "%USERPROFILE%\tcp-proxy.js"
 
 echo.
 echo ============================================
@@ -34,6 +34,6 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 echo WSL 端請執行：
-echo   CHROME_HOST=172.29.16.1 CHROME_PORT=9223 CDP_PROXY_PORT=3456 python3 ~/.hermes/skills/web-access/scripts/cdp-bridge.py
+echo   ~/.hermes/skills/web-access/scripts/cdp-bridge.sh start
 echo.
 pause

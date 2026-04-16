@@ -11,7 +11,7 @@ detect_env() {
     if grep -qi microsoft /proc/version 2>/dev/null; then
         # WSL2 - get Windows gateway IP
         GATEWAY_IP=$(ip route show default 2>/dev/null | grep -oP 'via \K[\d.]+')
-        GATEWAY_IP=${GATEWAY_IP:-172.29.16.1}
+        GATEWAY_IP=${GATEWAY_IP:-127.0.0.1}
         echo "wsl2:$GATEWAY_IP"
     else
         echo "native:127.0.0.1"
