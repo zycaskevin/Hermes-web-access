@@ -564,27 +564,48 @@ async def wait_for_load(target_id: str, timeout_ms: int | None = None) -> str:
     timeout_ms = timeout_ms or NAV_POLL_TIMEOUT * 1000
     try:
         await cdp_command('Page.enable', {}, target_id=target_id)
-    except RuntimeError:
-        pass
+    except (RuntimeError, ConnectionError) as e:
+        logger.debug(f'Page.enable failed during waitForLoad (target may not be ready): {e}')
     
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_ms / 1000
+    poll_errors = 0
     while loop.time() < deadline:
         try:
             result = await cdp_command('Runtime.evaluate', {
                 'expression': 'document.readyState',
                 'returnByValue': True,
             }, target_id=target_id)
+            # Check CDP-level errors (not exceptions, but error in result)
+            if 'error' in result and 'result' not in result:
+                poll_errors += 1
+                if poll_errors > 3:
+                    logger.warning(f'CDP error during waitForLoad: {result.get("error")}')
+                    return 'error'
+                await asyncio.sleep(NAV_POLL_INTERVAL)
+                continue
             if result.get('result', {}).get('result', {}).get('value') == 'complete':
                 return 'complete'
-        except RuntimeError:
-            pass
+            poll_errors = 0  # Reset on successful response
+        except (RuntimeError, ConnectionError) as e:
+            poll_errors += 1
+            if poll_errors > 3:
+                logger.warning(f'Repeated errors during waitForLoad for {target_id[:8]}...: {e}')
+                return 'error'
+            await asyncio.sleep(NAV_POLL_INTERVAL)
+            continue
         await asyncio.sleep(NAV_POLL_INTERVAL)
     logger.warning(f'waitForLoad timed out after {timeout_ms}ms for target {target_id[:8]}...')
     return 'timeout'
 
 
 # --- HTTP API Handlers ---
+
+def _cdp_error(result: dict) -> dict | None:
+    """Extract CDP-level error from result dict. Returns error dict or None."""
+    if 'error' in result and 'result' not in result:
+        return result['error'] if isinstance(result['error'], dict) else {'message': result['error']}
+    return None
 
 async def handle_targets(request: web.Request) -> web.Response:
     """List Chrome targets: GET /targets"""
@@ -647,6 +668,9 @@ async def handle_info(request: web.Request) -> web.Response:
             'returnByValue': True,
             'awaitPromise': True,
         }, target_id=target_id)
+        # Check CDP-level error
+        if 'error' in result and 'result' not in result:
+            return web.json_response({'error': result['error']}, status=502)
         value = result.get('result', {}).get('result', {}).get('value', '{}')
         if isinstance(value, str):
             try:
@@ -657,6 +681,7 @@ async def handle_info(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_info RuntimeError for {target_id[:8]}...: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_eval(request: web.Request) -> web.Response:
@@ -685,6 +710,7 @@ async def handle_eval(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_eval RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_navigate(request: web.Request) -> web.Response:
@@ -700,11 +726,15 @@ async def handle_navigate(request: web.Request) -> web.Response:
         return web.json_response({'error': url_error}, status=400)
     try:
         result = await cdp_command('Page.navigate', {'url': url}, target_id=target_id)
+        cdp_err = _cdp_error(result)
+        if cdp_err:
+            return web.json_response({'error': cdp_err}, status=502)
         await wait_for_load(target_id)
         return web.json_response(result.get('result', result))
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_navigate RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_back(request: web.Request) -> web.Response:
@@ -719,6 +749,7 @@ async def handle_back(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_back RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_click(request: web.Request) -> web.Response:
@@ -750,6 +781,7 @@ async def handle_click(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_click RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_click_at(request: web.Request) -> web.Response:
@@ -786,6 +818,7 @@ async def handle_click_at(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_click_at RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_scroll(request: web.Request) -> web.Response:
@@ -823,6 +856,7 @@ async def handle_scroll(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_scroll RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 # --- Input validation helpers ---
@@ -897,6 +931,7 @@ async def handle_screenshot(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_screenshot RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_set_files(request: web.Request) -> web.Response:
@@ -929,6 +964,7 @@ async def handle_set_files(request: web.Request) -> web.Response:
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
     except RuntimeError as e:
+        logger.warning(f'handle_set_files RuntimeError: {e}')
         return web.json_response({'error': str(e)}, status=502)
 
 async def handle_health(request: web.Request) -> web.Response:
