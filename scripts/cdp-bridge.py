@@ -78,7 +78,11 @@ else:
 
 # --- Chrome auto-discovery ---
 def _discover_chrome_port() -> int | None:
-    """Try to discover Chrome's debug port from DevToolsActivePort file."""
+    """Try to discover Chrome's debug port from DevToolsActivePort file.
+    
+    Checks multiple browser variants (Chrome, Chrome Canary, Chromium, Edge, Brave)
+    and falls back to probing well-known debug ports.
+    """
     home = Path.home()
     possible_paths: list[Path] = []
     
@@ -87,18 +91,25 @@ def _discover_chrome_port() -> int | None:
             home / 'Library/Application Support/Google/Chrome/DevToolsActivePort',
             home / 'Library/Application Support/Google/Chrome Canary/DevToolsActivePort',
             home / 'Library/Application Support/Chromium/DevToolsActivePort',
+            home / 'Library/Application Support/Microsoft Edge/DevToolsActivePort',
+            home / 'Library/Application Support/BraveSoftware/Brave-Browser/DevToolsActivePort',
         ]
     elif sys.platform == 'linux':
         possible_paths = [
             home / '.config/google-chrome/DevToolsActivePort',
             home / '.config/chromium/DevToolsActivePort',
+            home / '.config/microsoft-edge/DevToolsActivePort',
+            home / '.config/BraveSoftware/Brave-Browser/DevToolsActivePort',
         ]
     elif sys.platform == 'win32':
         local_app_data = os.environ.get('LOCALAPPDATA', '')
         if local_app_data:
             possible_paths = [
                 Path(local_app_data) / 'Google/Chrome/User Data/DevToolsActivePort',
+                Path(local_app_data) / 'Google/Chrome SxS/User Data/DevToolsActivePort',
                 Path(local_app_data) / 'Chromium/User Data/DevToolsActivePort',
+                Path(local_app_data) / 'Microsoft/Edge/User Data/DevToolsActivePort',
+                Path(local_app_data) / 'BraveSoftware/Brave-Browser/User Data/DevToolsActivePort',
             ]
     
     for p in possible_paths:
@@ -106,14 +117,15 @@ def _discover_chrome_port() -> int | None:
             lines = p.read_text().strip().split('\n')
             port = int(lines[0])
             if 0 < port < 65536 and _check_port(port):
-                logger.info(f'Discovered Chrome debug port from {p}: {port}')
+                logger.info(f'Discovered debug port from {p}: {port}')
                 return port
         except (OSError, ValueError, IndexError):
             continue
     
+    # Port probing fallback
     for port in (9222, 9229, 9333):
         if _check_port(port):
-            logger.info(f'Discovered Chrome debug port by probing: {port}')
+            logger.info(f'Discovered debug port by probing: {port}')
             return port
     
     return None
@@ -133,6 +145,33 @@ def _check_port_available(port: int, host: str = '127.0.0.1') -> bool:
             return True
     except OSError:
         return False
+
+def _get_windows_username() -> str | None:
+    """Get Windows username from WSL2. Used to locate Chrome DevToolsActivePort."""
+    if not _is_wsl2():
+        return None
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['cmd.exe', '/c', 'echo', '%USERNAME%'],
+            capture_output=True, text=True, timeout=5,
+        )
+        username = result.stdout.strip().rstrip('\r\n')
+        # Validate: should not be empty or just %USERNAME%
+        if username and '%' not in username:
+            return username
+    except Exception as e:
+        logger.debug(f'Failed to get Windows username: {e}')
+    # Fallback: scan /mnt/c/Users/ for non-default directories
+    try:
+        users_dir = Path('/mnt/c/Users')
+        if users_dir.exists():
+            for d in sorted(users_dir.iterdir()):
+                if d.is_dir() and d.name not in ('Public', 'Default', 'Default User', 'All Users'):
+                    return d.name
+    except Exception:
+        pass
+    return None
 
 # Auto-discover Chrome port if not explicitly set and not WSL2
 if not os.environ.get('CHROME_HOST') and not _is_wsl2():
@@ -244,19 +283,48 @@ class CDPConnection:
             self._connecting.set()
     
     async def _discover_ws_url(self) -> str | None:
-        """Discover Chrome's browser WebSocket URL."""
-        # Try DevToolsActivePort with wsPath (like upstream)
+        """Discover Chrome's browser WebSocket URL.
+        
+        Tries DevToolsActivePort files for multiple browser variants,
+        then falls back to /json/version HTTP endpoint.
+        """
+        # DevToolsActivePort paths for different OS/browser combos
         home = Path.home()
         possible_paths: list[Path] = []
         
         if sys.platform == 'darwin':
-            possible_paths = [home / 'Library/Application Support/Google/Chrome/DevToolsActivePort']
+            possible_paths = [
+                home / 'Library/Application Support/Google/Chrome/DevToolsActivePort',
+                home / 'Library/Application Support/Google/Chrome Canary/DevToolsActivePort',
+                home / 'Library/Application Support/Chromium/DevToolsActivePort',
+                home / 'Library/Application Support/Microsoft Edge/DevToolsActivePort',
+                home / 'Library/Application Support/BraveSoftware/Brave-Browser/DevToolsActivePort',
+            ]
         elif sys.platform == 'linux':
-            possible_paths = [home / '.config/google-chrome/DevToolsActivePort']
+            possible_paths = [
+                home / '.config/google-chrome/DevToolsActivePort',
+                home / '.config/chromium/DevToolsActivePort',
+                home / '.config/microsoft-edge/DevToolsActivePort',
+                home / '.config/BraveSoftware/Brave-Browser/DevToolsActivePort',
+            ]
         elif sys.platform == 'win32':
             local_app_data = os.environ.get('LOCALAPPDATA', '')
             if local_app_data:
-                possible_paths = [Path(local_app_data) / 'Google/Chrome/User Data/DevToolsActivePort']
+                possible_paths = [
+                    Path(local_app_data) / 'Google/Chrome/User Data/DevToolsActivePort',
+                    Path(local_app_data) / 'Google/Chrome SxS/User Data/DevToolsActivePort',
+                    Path(local_app_data) / 'Chromium/User Data/DevToolsActivePort',
+                    Path(local_app_data) / 'Microsoft/Edge/User Data/DevToolsActivePort',
+                    Path(local_app_data) / 'BraveSoftware/Brave-Browser/User Data/DevToolsActivePort',
+                ]
+        
+        # WSL2: also check Windows Chrome via /mnt/c/ paths
+        if _is_wsl2():
+            win_username = _get_windows_username()
+            if win_username:
+                win_base = Path(f'/mnt/c/Users/{win_username}/AppData/Local')
+                for browser in ['Google/Chrome', 'Google/Chrome SxS', 'Chromium', 'Microsoft/Edge', 'BraveSoftware/Brave-Browser']:
+                    possible_paths.append(win_base / browser / 'User Data/DevToolsActivePort')
         
         for p in possible_paths:
             try:
