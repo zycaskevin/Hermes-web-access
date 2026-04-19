@@ -608,6 +608,10 @@ async def handle_version(request: web.Request) -> web.Response:
 async def handle_new(request: web.Request) -> web.Response:
     """Open new tab: GET /new?url=..."""
     url = request.query.get('url', 'about:blank')
+    if url != 'about:blank':
+        url_error = _validate_url(url)
+        if url_error:
+            return web.json_response({'error': url_error}, status=400)
     try:
         await _conn.connect()
         result = await _conn.send_cdp('Target.createTarget', {'url': url, 'background': True})
@@ -663,6 +667,8 @@ async def handle_eval(request: web.Request) -> web.Response:
     expression = await request.text()
     if not expression:
         return web.json_response({'error': 'Empty JS expression'}, status=400)
+    if len(expression) > MAX_JS_EXPR_LENGTH:
+        return web.json_response({'error': f'JS expression too long ({len(expression)} > {MAX_JS_EXPR_LENGTH})'}, status=400)
     try:
         result = await cdp_command('Runtime.evaluate', {
             'expression': expression,
@@ -689,6 +695,9 @@ async def handle_navigate(request: web.Request) -> web.Response:
         return web.json_response({'error': 'Missing target parameter'}, status=400)
     if not url:
         return web.json_response({'error': 'Missing url parameter'}, status=400)
+    url_error = _validate_url(url)
+    if url_error:
+        return web.json_response({'error': url_error}, status=400)
     try:
         result = await cdp_command('Page.navigate', {'url': url}, target_id=target_id)
         await wait_for_load(target_id)
@@ -720,6 +729,8 @@ async def handle_click(request: web.Request) -> web.Response:
     selector = await request.text()
     if not selector:
         return web.json_response({'error': 'POST body needs a CSS selector'}, status=400)
+    if len(selector) > MAX_SELECTOR_LENGTH:
+        return web.json_response({'error': f'Selector too long ({len(selector)} > {MAX_SELECTOR_LENGTH})'}, status=400)
     try:
         selector_json = json.dumps(selector)
         js = f'''(() => {{
@@ -749,6 +760,8 @@ async def handle_click_at(request: web.Request) -> web.Response:
     selector = await request.text()
     if not selector:
         return web.json_response({'error': 'POST body needs a CSS selector'}, status=400)
+    if len(selector) > MAX_SELECTOR_LENGTH:
+        return web.json_response({'error': f'Selector too long ({len(selector)} > {MAX_SELECTOR_LENGTH})'}, status=400)
     try:
         selector_json = json.dumps(selector)
         js = f'''(() => {{
@@ -812,6 +825,43 @@ async def handle_scroll(request: web.Request) -> web.Response:
     except RuntimeError as e:
         return web.json_response({'error': str(e)}, status=502)
 
+# --- Input validation helpers ---
+MAX_JS_EXPR_LENGTH = 100_000  # 100KB max JS expression
+MAX_SELECTOR_LENGTH = 10_000  # 10KB max CSS selector
+ALLOWED_SCREENSHOT_DIRS: tuple[str, ...] = ('/tmp/', '/var/tmp/', '/home/')
+if _is_wsl2():
+    # Allow writing to WSL2 /mnt/ paths for Windows access
+    ALLOWED_SCREENSHOT_DIRS += ('/mnt/',)
+
+def _validate_filepath(filepath: str) -> str | None:
+    """Validate screenshot save path. Returns error message or None if OK."""
+    if not filepath:
+        return None
+    resolved = os.path.realpath(filepath)
+    # Path traversal check
+    if '..' in filepath or resolved != filepath and not resolved.startswith(filepath.rstrip('/') + '/'):
+        # Allow if resolved path is still within allowed dirs
+        pass
+    # Must be within allowed directories
+    if not any(resolved.startswith(d) for d in ALLOWED_SCREENSHOT_DIRS):
+        # Also allow if the original (non-resolved) path starts with allowed dirs
+        if not any(filepath.startswith(d) for d in ALLOWED_SCREENSHOT_DIRS):
+            return f'Path not allowed: {filepath}. Must be under {", ".join(ALLOWED_SCREENSHOT_DIRS)}'
+    # Block sensitive paths
+    sensitive = ('/etc/', '/root/', '/boot/', '/proc/', '/sys/', '/dev/')
+    if any(resolved.startswith(s) for s in sensitive):
+        return f'Cannot write to system path: {filepath}'
+    return None
+
+def _validate_url(url: str) -> str | None:
+    """Validate navigation URL. Blocks file:// and other dangerous schemes."""
+    lower = url.lower().strip()
+    dangerous_schemes = ('file:', 'javascript:', 'data:', 'vbscript:')
+    for scheme in dangerous_schemes:
+        if lower.startswith(scheme):
+            return f'{scheme} scheme is not allowed for navigation'
+    return None
+
 async def handle_screenshot(request: web.Request) -> web.Response:
     """Screenshot: GET /screenshot?target=ID&file=/tmp/shot.png&format=png"""
     target_id = request.query.get('target', '')
@@ -821,6 +871,9 @@ async def handle_screenshot(request: web.Request) -> web.Response:
     fmt = request.query.get('format', 'png')
     if fmt not in ('png', 'jpeg'):
         return web.json_response({'error': f'Invalid format: {fmt}. Use png|jpeg'}, status=400)
+    path_error = _validate_filepath(filepath)
+    if path_error:
+        return web.json_response({'error': path_error}, status=400)
     try:
         params: dict = {'format': fmt}
         if fmt == 'jpeg':

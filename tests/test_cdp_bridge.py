@@ -242,3 +242,107 @@ class TestUtilities:
 
     def test_wsl2_microsoft_string(self):
         assert 'microsoft' in 'Linux version 5.15 Microsoft'.lower()
+
+
+# --- P1 Security validation tests ---
+
+class TestPathValidation:
+    def test_allowed_tmp_path(self):
+        assert cdp_bridge._validate_filepath('/tmp/shot.png') is None
+
+    def test_allowed_home_path(self):
+        assert cdp_bridge._validate_filepath('/home/user/shot.png') is None
+
+    def test_blocked_etc_path(self):
+        result = cdp_bridge._validate_filepath('/etc/passwd')
+        assert result is not None
+        assert 'not allowed' in result or 'system path' in result
+
+    def test_blocked_root_path(self):
+        result = cdp_bridge._validate_filepath('/root/shot.png')
+        assert result is not None
+
+    def test_blocked_proc_path(self):
+        result = cdp_bridge._validate_filepath('/proc/self/mem')
+        assert result is not None
+
+    def test_blocked_unknown_prefix(self):
+        result = cdp_bridge._validate_filepath('/opt/secret/shot.png')
+        assert result is not None
+        assert 'not allowed' in result
+
+    def test_empty_path_ok(self):
+        assert cdp_bridge._validate_filepath('') is None
+
+    def test_path_traversal_attempt(self):
+        result = cdp_bridge._validate_filepath('/tmp/../../../etc/passwd')
+        # realpath resolves this to /etc/passwd, which should be blocked
+        assert result is not None
+
+
+class TestURLValidation:
+    def test_allowed_http(self):
+        assert cdp_bridge._validate_url('https://example.com') is None
+
+    def test_blocked_file_scheme(self):
+        result = cdp_bridge._validate_url('file:///etc/passwd')
+        assert result is not None
+        assert 'file:' in result
+
+    def test_blocked_javascript_scheme(self):
+        result = cdp_bridge._validate_url('javascript:alert(1)')
+        assert result is not None
+        assert 'javascript:' in result
+
+    def test_blocked_data_scheme(self):
+        result = cdp_bridge._validate_url('data:text/html,<h1>hi</h1>')
+        assert result is not None
+        assert 'data:' in result
+
+    def test_blocked_vbscript_scheme(self):
+        result = cdp_bridge._validate_url('vbscript:msgbox(1)')
+        assert result is not None
+
+    def test_case_insensitive_scheme(self):
+        result = cdp_bridge._validate_url('FILE:///etc/passwd')
+        assert result is not None
+
+    def test_whitespace_stripped(self):
+        result = cdp_bridge._validate_url('  file:///etc/passwd  ')
+        assert result is not None
+
+
+class TestInputLengthLimits:
+    @pytest.mark.asyncio
+    async def test_eval_too_long(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        long_js = 'x' * (cdp_bridge.MAX_JS_EXPR_LENGTH + 1)
+        resp = await client.post('/eval?target=X', data=long_js)
+        assert resp.status == 400
+        data = await resp.json()
+        assert 'too long' in data.get('error', '')
+
+    @pytest.mark.asyncio
+    async def test_click_selector_too_long(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        long_selector = 'x' * (cdp_bridge.MAX_SELECTOR_LENGTH + 1)
+        resp = await client.post('/click?target=X', data=long_selector)
+        assert resp.status == 400
+        data = await resp.json()
+        assert 'too long' in data.get('error', '')
+
+    @pytest.mark.asyncio
+    async def test_navigate_file_scheme_blocked(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.get('/navigate?target=X&url=file:///etc/passwd')
+        assert resp.status == 400
+        data = await resp.json()
+        assert 'file:' in data.get('error', '')
+
+    @pytest.mark.asyncio
+    async def test_screenshot_blocked_path(self, app, aiohttp_client):
+        client = await aiohttp_client(app)
+        resp = await client.get('/screenshot?target=X&file=/etc/exploit.png')
+        assert resp.status == 400
+        data = await resp.json()
+        assert 'system path' in data.get('error', '') or 'not allowed' in data.get('error', '')
