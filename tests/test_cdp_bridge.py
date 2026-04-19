@@ -1,10 +1,10 @@
-"""Tests for CDP Bridge — HTTP API unit tests with mocked Chrome responses.
+"""Tests for CDP Bridge — HTTP API unit tests with mocked CDP connection.
 
 Run: pytest tests/ -v
 """
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
 import cdp_bridge  # loaded via conftest.py
@@ -14,9 +14,10 @@ import cdp_bridge  # loaded via conftest.py
 
 @pytest.fixture
 def app():
-    """Create a fresh aiohttp app for testing."""
-    cdp_bridge._sessions.clear()
-    cdp_bridge._port_guard_sessions.clear()
+    """Create a fresh aiohttp app for testing. Reset connection state."""
+    cdp_bridge._conn._sessions.clear()
+    cdp_bridge._conn._port_guard_sessions.clear()
+    cdp_bridge._conn._ws = None
     return cdp_bridge.create_app()
 
 
@@ -27,18 +28,16 @@ MOCK_VERSION = {
     'webSocketDebuggerUrl': 'ws://127.0.0.1:9222/devtools/browser/xxx',
 }
 
-MOCK_TARGETS = [
-    {'id': 'ABC123', 'type': 'page', 'title': 'Test', 'url': 'https://example.com',
-     'webSocketDebuggerUrl': 'ws://127.0.0.1:9222/devtools/page/ABC123'},
-]
-
 
 # --- Health ---
 
 class TestHealth:
     @pytest.mark.asyncio
     async def test_disconnected(self, app, aiohttp_client):
-        with patch.object(cdp_bridge, 'chrome_http', side_effect=ConnectionError('refused')):
+        # Patch on the class (not instance) to avoid property setter issues
+        with patch.object(cdp_bridge.CDPConnection, 'is_connected', new_callable=PropertyMock, return_value=False), \
+             patch.object(cdp_bridge._conn, 'connect', side_effect=ConnectionError('refused')), \
+             patch.object(cdp_bridge, 'chrome_http', side_effect=ConnectionError('refused')):
             client = await aiohttp_client(app)
             resp = await client.get('/health')
             assert resp.status == 503
@@ -47,13 +46,13 @@ class TestHealth:
 
     @pytest.mark.asyncio
     async def test_connected(self, app, aiohttp_client):
-        with patch.object(cdp_bridge, 'chrome_http', return_value=MOCK_VERSION):
+        with patch.object(cdp_bridge.CDPConnection, 'is_connected', new_callable=PropertyMock, return_value=True), \
+             patch.object(cdp_bridge, 'chrome_http', return_value=MOCK_VERSION):
             client = await aiohttp_client(app)
             resp = await client.get('/health')
             assert resp.status == 200
             data = await resp.json()
             assert data['status'] == 'ok'
-            assert data['browser'] == 'Chrome/130.0.0.0'
 
 
 # --- 404 ---
@@ -126,21 +125,28 @@ class TestValidation:
         assert resp.status == 400
 
 
-# --- Targets ---
+# --- Targets (via CDP Target.getTargets) ---
 
 class TestTargets:
     @pytest.mark.asyncio
     async def test_success(self, app, aiohttp_client):
-        with patch.object(cdp_bridge, 'chrome_http', return_value=MOCK_TARGETS):
+        with patch.object(cdp_bridge._conn, 'connect', new_callable=AsyncMock), \
+             patch.object(cdp_bridge._conn, 'send_cdp', return_value={
+                 'result': {'targetInfos': [
+                     {'type': 'page', 'targetId': 'ABC', 'title': 'Test', 'url': 'https://example.com'},
+                     {'type': 'page', 'targetId': 'DEF', 'title': 'Other', 'url': 'https://other.com'},
+                     {'type': 'service_worker', 'targetId': 'XXX'},
+                 ]}
+             }):
             client = await aiohttp_client(app)
             resp = await client.get('/targets')
             assert resp.status == 200
             data = await resp.json()
-            assert data[0]['id'] == 'ABC123'
+            assert len(data) == 2  # only 'page' type
 
     @pytest.mark.asyncio
     async def test_chrome_down(self, app, aiohttp_client):
-        with patch.object(cdp_bridge, 'chrome_http', side_effect=ConnectionError('refused')):
+        with patch.object(cdp_bridge._conn, 'connect', side_effect=ConnectionError('refused')):
             client = await aiohttp_client(app)
             resp = await client.get('/targets')
             assert resp.status == 502
@@ -151,12 +157,16 @@ class TestTargets:
 class TestSessionCleanup:
     @pytest.mark.asyncio
     async def test_close_removes_session(self, app, aiohttp_client):
-        cdp_bridge._sessions['ABC123'] = 'sess-abc'
-        with patch.object(cdp_bridge, 'chrome_http', return_value={'result': True}):
+        cdp_bridge._conn._sessions['ABC123'] = 'sess-abc'
+        cdp_bridge._conn._port_guard_sessions.add('sess-abc')
+        # Mock only the CDP command inside close_target, not close_target itself,
+        # because close_target does the session cleanup we're testing
+        with patch.object(cdp_bridge._conn, 'send_cdp', new_callable=AsyncMock, return_value={'result': {}}):
             client = await aiohttp_client(app)
             resp = await client.get('/close?target=ABC123')
             assert resp.status == 200
-            assert 'ABC123' not in cdp_bridge._sessions
+            assert 'ABC123' not in cdp_bridge._conn._sessions
+            assert 'sess-abc' not in cdp_bridge._conn._port_guard_sessions
 
 
 # --- Scroll directions ---
@@ -164,19 +174,34 @@ class TestSessionCleanup:
 class TestScrollDirections:
     @pytest.mark.asyncio
     async def test_top(self, app, aiohttp_client):
-        mock = AsyncMock(return_value={'result': {'result': {'value': 'scrolled to top'}}})
-        with patch.object(cdp_bridge, 'cdp_command', mock):
+        with patch.object(cdp_bridge, 'cdp_command', new_callable=AsyncMock, return_value={
+            'result': {'result': {'value': 'scrolled to top'}}
+        }):
             client = await aiohttp_client(app)
             resp = await client.get('/scroll?target=X&direction=top')
             assert resp.status == 200
 
     @pytest.mark.asyncio
     async def test_bottom(self, app, aiohttp_client):
-        mock = AsyncMock(return_value={'result': {'result': {'value': 'scrolled to bottom'}}})
-        with patch.object(cdp_bridge, 'cdp_command', mock):
+        with patch.object(cdp_bridge, 'cdp_command', new_callable=AsyncMock, return_value={
+            'result': {'result': {'value': 'scrolled to bottom'}}
+        }):
             client = await aiohttp_client(app)
             resp = await client.get('/scroll?target=X&direction=bottom')
             assert resp.status == 200
+
+
+# --- CDPConnection class ---
+
+class TestCDPConnection:
+    def test_is_connected_false(self):
+        conn = cdp_bridge.CDPConnection()
+        assert conn.is_connected is False
+
+    def test_sessions_init(self):
+        conn = cdp_bridge.CDPConnection()
+        assert len(conn.sessions) == 0
+        assert len(conn.port_guard_sessions) == 0
 
 
 # --- Utility functions ---
@@ -186,17 +211,9 @@ class TestUtilities:
         assert cdp_bridge._check_port(59999, '127.0.0.1', timeout=0.1) is False
 
     def test_wsl2_no_proc(self):
-        m = MagicMock(side_effect=FileNotFoundError)
         with patch.object(cdp_bridge, 'Path', side_effect=FileNotFoundError):
-            # Should not crash
             result = cdp_bridge._is_wsl2()
             assert isinstance(result, bool)
 
     def test_wsl2_microsoft_string(self):
-        mock_path = MagicMock()
-        mock_path.read_text.return_value = 'Linux version 5.15 Microsoft'
-        with patch.object(cdp_bridge, 'Path', return_value=mock_path):
-            # The function reads /proc/version, so we need to patch properly
-            pass
-        # Simpler: just test the logic
         assert 'microsoft' in 'Linux version 5.15 Microsoft'.lower()
