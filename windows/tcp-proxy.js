@@ -22,40 +22,46 @@ const server = net.createServer((clientSocket) => {
     return;
   }
 
+  let cleaned = false;
+
   const targetSocket = net.connect(TARGET_PORT, TARGET_HOST, () => {
     activeConnections++;
     console.log(`[proxy] Connected: ${clientSocket.remoteAddress}:${clientSocket.remotePort} -> ${TARGET_HOST}:${TARGET_PORT} (${activeConnections} active)`);
   });
-  
+
   clientSocket.pipe(targetSocket);
   targetSocket.pipe(clientSocket);
-  
+
   // Idle timeout to prevent resource exhaustion
   const idleTimer = setTimeout(() => {
     console.log(`[proxy] Idle timeout, closing connection`);
     clientSocket.destroy();
     targetSocket.destroy();
   }, IDLE_TIMEOUT_MS);
-  
+
   const resetIdle = () => idleTimer.refresh();
   clientSocket.on('data', resetIdle);
   targetSocket.on('data', resetIdle);
-  
+
   const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     clearTimeout(idleTimer);
     if (activeConnections > 0) activeConnections--;
     targetSocket.destroy();
   };
-  
+
   clientSocket.on('error', (err) => {
     console.error(`[proxy] Client error: ${err.message}`);
     cleanup();
   });
   targetSocket.on('error', (err) => {
     console.error(`[proxy] Target error: ${err.message}`);
-    clientSocket.destroy();
+    // Don't call cleanup() here — targetSocket.destroy() in cleanup will
+    // trigger 'close' on clientSocket, which would double-decrement.
+    // Instead, just clean up client side.
     clearTimeout(idleTimer);
-    if (activeConnections > 0) activeConnections--;
+    clientSocket.destroy();
   });
   clientSocket.on('close', cleanup);
   targetSocket.on('close', () => {
