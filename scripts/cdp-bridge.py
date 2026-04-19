@@ -160,7 +160,13 @@ class CDPConnection:
     
     This replaces the old architecture where each cdp_command() created a new WS.
     Now we maintain one connection and route via sessionId, matching upstream.
+    Includes automatic reconnection with exponential backoff.
     """
+    
+    # Reconnection config
+    RECONNECT_MAX_RETRIES = 3
+    RECONNECT_BASE_DELAY = 1.0  # seconds
+    RECONNECT_MAX_DELAY = 10.0  # seconds
     
     def __init__(self):
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -173,6 +179,7 @@ class CDPConnection:
         self._connecting: asyncio.Event = asyncio.Event()
         self._connecting.set()  # not currently connecting
         self._closed = False
+        self._reconnect_count = 0
     
     @property
     def sessions(self) -> dict[str, str]:
@@ -337,47 +344,86 @@ class CDPConnection:
         except Exception as e:
             logger.error(f'Event listener error: {e}')
         finally:
-            # Mark disconnected, reject all pending
+            # Clean up pending futures and mark disconnected
             self._closed = True
+            old_ws = self._ws
+            self._ws = None
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(ConnectionError('Browser WebSocket closed'))
             self._pending.clear()
             self._sessions.clear()
             self._port_guard_sessions.clear()
-            self._ws = None
+            # Auto-reconnect if not intentionally closed
+            if old_ws and not old_ws.closed:
+                # WS error, schedule reconnect
+                pass  # Will reconnect on next send_cdp() call via connect()
     
     async def send_cdp(self, method: str, params: dict | None = None,
                         session_id: str | None = None, timeout: int | None = None) -> dict:
-        """Send a CDP command via the persistent browser WebSocket."""
-        await self.connect()
+        """Send a CDP command via the persistent browser WebSocket.
         
-        if not self._ws or self._ws.closed:
-            raise ConnectionError('Not connected to Chrome CDP')
+        On connection failure, automatically retries with exponential backoff.
+        """
+        last_error = None
+        for attempt in range(self.RECONNECT_MAX_RETRIES + 1):
+            try:
+                await self.connect()
+                
+                if not self._ws or self._ws.closed:
+                    raise ConnectionError('Not connected to Chrome CDP')
+                
+                self._cmd_id += 1
+                current_id = self._cmd_id
+                msg: dict = {'id': current_id, 'method': method}
+                if params:
+                    msg['params'] = params
+                if session_id:
+                    msg['sessionId'] = session_id
+                
+                # Create future for response
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                self._pending[current_id] = fut
+                
+                timeout_s = timeout or CDP_WS_TIMEOUT
+                try:
+                    await self._ws.send_str(json.dumps(msg))
+                    result = await asyncio.wait_for(fut, timeout=timeout_s)
+                    # Reset reconnect count on success
+                    self._reconnect_count = 0
+                    return result
+                except asyncio.TimeoutError:
+                    self._pending.pop(current_id, None)
+                    raise TimeoutError(f'CDP command {method} timed out after {timeout_s}s')
+                except ConnectionError:
+                    self._pending.pop(current_id, None)
+                    raise  # Don't retry on session-level errors
+                except Exception as e:
+                    self._pending.pop(current_id, None)
+                    last_error = e
+                    # Connection might be broken, force reconnect
+                    if self._ws:
+                        try:
+                            await self._ws.close()
+                        except Exception:
+                            pass
+                        self._ws = None
+                    # Fall through to retry
+            except (ConnectionError, TimeoutError) as e:
+                last_error = e
+            
+            # Exponential backoff before retry
+            if attempt < self.RECONNECT_MAX_RETRIES:
+                delay = min(
+                    self.RECONNECT_BASE_DELAY * (2 ** self._reconnect_count),
+                    self.RECONNECT_MAX_DELAY,
+                )
+                self._reconnect_count += 1
+                logger.warning(f'CDP connection lost, retrying in {delay:.1f}s (attempt {attempt+1}/{self.RECONNECT_MAX_RETRIES})')
+                await asyncio.sleep(delay)
         
-        self._cmd_id += 1
-        current_id = self._cmd_id
-        msg: dict = {'id': current_id, 'method': method}
-        if params:
-            msg['params'] = params
-        if session_id:
-            msg['sessionId'] = session_id
-        
-        # Create future for response
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        self._pending[current_id] = fut
-        
-        timeout_s = timeout or CDP_WS_TIMEOUT
-        try:
-            await self._ws.send_str(json.dumps(msg))
-            return await asyncio.wait_for(fut, timeout=timeout_s)
-        except asyncio.TimeoutError:
-            self._pending.pop(current_id, None)
-            raise TimeoutError(f'CDP command {method} timed out after {timeout_s}s')
-        except Exception as e:
-            self._pending.pop(current_id, None)
-            raise
+        raise last_error or ConnectionError('Failed to send CDP command after retries')
     
     async def ensure_session(self, target_id: str) -> str:
         """Get or create a CDP session for the target."""
