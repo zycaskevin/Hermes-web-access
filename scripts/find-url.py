@@ -114,7 +114,9 @@ def search_history(
         return []
     
     # Copy to temp (Chrome locks the original)
-    tmp = Path(tempfile.mktemp(suffix='.sqlite'))
+    # Use NamedTemporaryFile for secure, unpredictable filenames (CVE-2023-??)
+    with tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False) as tmp_fh:
+        tmp = Path(tmp_fh.name)
     try:
         shutil.copy2(history_file, tmp)
         
@@ -231,7 +233,9 @@ def main():
     
     # Sort history across profiles
     if args.sort == 'visits':
-        all_history.sort(key=lambda x: (-(x.get('visit_count') or 0), x.get('visit', '')), reverse=False)
+        # Match upstream JS: (b.visit_count||0)-(a.visit_count||0) || b.visit.localeCompare(a.visit)
+        # visit_count DESC, then visit DESC (newest first) for tiebreaker
+        all_history.sort(key=lambda x: (x.get('visit_count') or 0, x.get('visit', '')), reverse=True)
     else:
         all_history.sort(key=lambda x: x.get('visit', ''), reverse=True)
     

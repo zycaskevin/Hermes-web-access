@@ -18,6 +18,25 @@ if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
     exit /b 1
 )
 
+:: Copy tcp-proxy.js to USERPROFILE if not already there
+if not exist "%USERPROFILE%\tcp-proxy.js" (
+    echo [SETUP] Copying tcp-proxy.js to %USERPROFILE%...
+    copy /Y "%~dp0tcp-proxy.js" "%USERPROFILE%\tcp-proxy.js" >nul
+    if errorlevel 1 (
+        echo [ERROR] Failed to copy tcp-proxy.js
+        pause
+        exit /b 1
+    )
+)
+
+:: Verify Node.js is available
+where node >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Node.js not found. Install from https://nodejs.org/
+    pause
+    exit /b 1
+)
+
 echo [1/3] 關閉所有 Chrome 進程...
 taskkill /F /IM chrome.exe >nul 2>&1
 timeout /t 3 /nobreak >nul

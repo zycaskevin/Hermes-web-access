@@ -270,8 +270,8 @@ async def enable_port_guard(target_id: str, session_id: str) -> None:
         }, target_id=target_id)
         _port_guard_sessions.add(session_id)
         logger.debug(f'Port guard enabled for session {session_id[:8]}...')
-    except RuntimeError:
-        logger.debug(f'Port guard failed (non-fatal) for session {session_id[:8]}...')
+    except RuntimeError as e:
+        logger.warning(f'Port guard failed for session {session_id[:8]}... (anti-detection disabled): {e}')
 
 async def wait_for_load(target_id: str, timeout_ms: int | None = None) -> str:
     """Poll readyState until 'complete' or timeout."""
@@ -281,7 +281,7 @@ async def wait_for_load(target_id: str, timeout_ms: int | None = None) -> str:
     except RuntimeError:
         pass  # Page may already be enabled
     
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_ms / 1000
     while loop.time() < deadline:
         try:
@@ -343,8 +343,10 @@ async def handle_close(request: web.Request) -> web.Response:
         return web.json_response({'error': 'Missing target parameter'}, status=400)
     try:
         data = await chrome_http(f'/json/close/{target_id}')
-        # Clean up session mapping
-        _sessions.pop(target_id, None)
+        # Clean up session mapping and port guard tracking
+        session_id = _sessions.pop(target_id, None)
+        if session_id:
+            _port_guard_sessions.discard(session_id)
         return web.json_response(data)
     except (ConnectionError, TimeoutError) as e:
         return web.json_response({'error': str(e)}, status=502)
@@ -722,7 +724,7 @@ async def main() -> None:
     """Entry point with port conflict detection and global error handling."""
     # Install global error handlers
     sys.excepthook = _handle_exception
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.set_exception_handler(_handle_loop_exception)
     
     # Port conflict detection

@@ -4,7 +4,10 @@
 
 set -euo pipefail
 
-CDP_BRIDGE_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/cdp-bridge.pid"
+# Use XDG_RUNTIME_DIR if available (more secure than /tmp)
+PID_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+CDP_BRIDGE_PIDFILE="$PID_DIR/cdp-bridge.pid"
+LOG_FILE="${XDG_RUNTIME_DIR:-/tmp}/cdp-bridge.log"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CDP_BRIDGE_SCRIPT="$SCRIPT_DIR/cdp-bridge.py"
 
@@ -25,20 +28,26 @@ start() {
         return 0
     fi
     
+    # Verify python3 is available
+    if ! command -v python3 &>/dev/null; then
+        echo "ERROR: python3 not found. Install: apt install python3 / brew install python3"
+        return 1
+    fi
+    
     export CHROME_HOST="${CHROME_HOST:-$DEFAULT_CHROME_HOST}"
     export CHROME_PORT="${CHROME_PORT:-$DEFAULT_CHROME_PORT}"
     export CDP_PROXY_PORT="${CDP_PROXY_PORT:-3456}"
     export CDP_BRIDGE_HOST="${CDP_BRIDGE_HOST:-127.0.0.1}"
     
     echo "Chrome at $CHROME_HOST:$CHROME_PORT → Bridge on $CDP_BRIDGE_HOST:$CDP_PROXY_PORT"
-    python3 "$CDP_BRIDGE_SCRIPT" &
+    python3 "$CDP_BRIDGE_SCRIPT" >> "$LOG_FILE" 2>&1 &
     echo $! > "$CDP_BRIDGE_PIDFILE"
     sleep 2
     
     if curl -s --max-time 3 "http://localhost:$CDP_PROXY_PORT/health" 2>/dev/null | grep -q '"ok"'; then
-        echo "CDP Bridge started ✓"
+        echo "CDP Bridge started ✓ (log: $LOG_FILE)"
     else
-        echo "Warning: CDP Bridge not responding. Check Chrome CDP + tcp-proxy."
+        echo "Warning: CDP Bridge not responding. Check log: $LOG_FILE"
     fi
 }
 
