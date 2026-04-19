@@ -20,7 +20,6 @@ import os
 import platform
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -108,68 +107,65 @@ def search_history(
     limit: int,
     sort: str,
 ) -> list[dict]:
-    """Search Chrome history SQLite database for matching keywords."""
+    """Search Chrome history SQLite database for matching keywords.
+    
+    Uses Python sqlite3 with parameterized queries to prevent SQL injection.
+    Copies the database to temp first (Chrome locks the original).
+    """
     history_file = profile_dir / 'History'
     if not history_file.exists():
         return []
     
     # Copy to temp (Chrome locks the original)
-    # Use NamedTemporaryFile for secure, unpredictable filenames (CVE-2023-??)
     with tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False) as tmp_fh:
         tmp = Path(tmp_fh.name)
     try:
         shutil.copy2(history_file, tmp)
         
-        # Check sqlite3 CLI availability
-        if not shutil.which('sqlite3'):
-            print('ERROR: sqlite3 not found. Install: apt install sqlite3 / brew install sqlite / winget install sqlite.sqlite',
-                  file=sys.stderr)
-            return []
-        
         conds = ['last_visit_time > 0']
+        params: list[str | int] = []
         for kw in keywords:
-            esc = kw.lower().replace("'", "''")
-            conds.append(f"LOWER(title || ' ' || url) LIKE '%{esc}%'")
+            conds.append("LOWER(title || ' ' || url) LIKE ?")
+            params.append(f'%{kw.lower()}%')
         
         # WebKit epoch: 1601-01-01 00:00:00 UTC
         WEBKIT_EPOCH_DIFF_US = 11644473600000000
         if since:
             webkit_us = int(since.timestamp() * 1_000_000) + WEBKIT_EPOCH_DIFF_US
-            conds.append(f'last_visit_time >= {webkit_us}')
+            conds.append('last_visit_time >= ?')
+            params.append(webkit_us)
         
         limit_clause = -1 if limit == 0 else limit * 2  # Fetch more for cross-profile merge
         order_by = 'visit_count DESC, last_visit_time DESC' if sort == 'visits' else 'last_visit_time DESC'
         
         sql = (
-            f"SELECT title, url, "
-            f"datetime((last_visit_time - 11644473600000000)/1000000, 'unixepoch', 'localtime') AS visit, "
+            "SELECT title, url, "
+            "datetime((last_visit_time - 11644473600000000)/1000000, 'unixepoch', 'localtime') AS visit, "
             f"visit_count FROM urls WHERE {' AND '.join(conds)} "
-            f"ORDER BY {order_by} LIMIT {limit_clause};"
+            f"ORDER BY {order_by} LIMIT ?"
         )
+        params.append(limit_clause)
         
-        result = subprocess.run(
-            ['sqlite3', '-separator', '\t', str(tmp), sql],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
+        try:
+            with sqlite3.connect(str(tmp)) as con:
+                con.row_factory = sqlite3.Row
+                cur = con.execute(sql, params)
+                rows = [
+                    {
+                        'profile': profile_name,
+                        'title': row['title'],
+                        'url': row['url'],
+                        'visit': row['visit'],
+                        'visit_count': row['visit_count'] if isinstance(row['visit_count'], int) else 0,
+                    }
+                    for row in cur.fetchall()
+                ]
+                return rows
+        except sqlite3.OperationalError as e:
+            print(f'ERROR: History search failed: {e}', file=sys.stderr)
             return []
-        
-        rows = []
-        for line in result.stdout.strip().split('\n'):
-            if not line:
-                continue
-            parts = line.split('\t')
-            if len(parts) >= 4:
-                rows.append({
-                    'profile': profile_name,
-                    'title': parts[0],
-                    'url': parts[1],
-                    'visit': parts[2],
-                    'visit_count': int(parts[3]) if parts[3].isdigit() else 0,
-                })
-        return rows
-    except (subprocess.TimeoutExpired, OSError) as e:
-        print(f'ERROR: History search failed: {e}', file=sys.stderr)
+    except OSError as e:
+        print(f'ERROR: History copy failed: {e}', file=sys.stderr)
         return []
     finally:
         try:

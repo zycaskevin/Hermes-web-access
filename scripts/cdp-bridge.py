@@ -42,6 +42,9 @@ CDP_WS_TIMEOUT = int(os.environ.get('CDP_WS_TIMEOUT', '30'))  # seconds
 NAV_POLL_INTERVAL = float(os.environ.get('NAV_POLL_INTERVAL', '0.5'))
 NAV_POLL_TIMEOUT = int(os.environ.get('NAV_POLL_TIMEOUT', '15'))
 
+# Port probing order for auto-discovery
+CHROME_PORT_PROBE_ORDER = (9222, 9229, 9333)
+
 # --- Platform detection ---
 def _is_wsl2() -> bool:
     """Check if running under WSL2."""
@@ -123,7 +126,7 @@ def _discover_chrome_port() -> int | None:
             continue
     
     # Port probing fallback
-    for port in (9222, 9229, 9333):
+    for port in CHROME_PORT_PROBE_ORDER:
         if _check_port(port):
             logger.info(f'Discovered debug port by probing: {port}')
             return port
