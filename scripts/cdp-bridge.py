@@ -1083,10 +1083,13 @@ async def main() -> None:
     logger.info(f'Proxying {BRIDGE_HOST}:{PROXY_PORT} → {CHROME_HOST}:{CHROME_PORT}')
     app = create_app()
     
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: asyncio.ensure_future(_shutdown(app, s)))
+    try:
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.ensure_future(_shutdown(app, signal.SIGTERM)))
+        loop.add_signal_handler(signal.SIGINT, lambda: asyncio.ensure_future(_shutdown(app, signal.SIGINT)))
+    except NotImplementedError:
+        pass  # Windows doesn't support add_signal_handler
     
-    web.run_app(app, host=BRIDGE_HOST, port=PROXY_PORT, print=None)
+    await web._run_app(app, host=BRIDGE_HOST, port=PROXY_PORT, print=None)
 
 async def _shutdown(app: web.Application, sig: signal.Signals) -> None:
     """Graceful shutdown handler."""

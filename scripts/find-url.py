@@ -26,12 +26,34 @@ from pathlib import Path
 
 
 def get_chrome_data_dir() -> Path | None:
-    """Get Chrome user data directory (cross-platform)."""
+    """Get Chrome user data directory (cross-platform, including WSL2)."""
     home = Path.home()
     system = platform.system()
     if system == 'Darwin':
         return home / 'Library/Application Support/Google/Chrome'
     elif system == 'Linux':
+        # Check WSL2 first — Chrome is likely on Windows
+        if 'microsoft' in _read_proc_version():
+            # Scan Windows user directories
+            for d in sorted(Path('/mnt/c/Users').iterdir()):
+                if d.is_dir() and d.name not in ('Public', 'Default', 'Default User', 'All Users'):
+                    win_chrome = d / 'AppData/Local/Google/Chrome/User Data'
+                    if win_chrome.exists():
+                        return win_chrome
+            # Fallback to known username
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ['cmd.exe', '/c', 'echo', '%USERNAME%'],
+                    capture_output=True, text=True, timeout=5,
+                )
+                username = result.stdout.strip().rstrip('\r\n')
+                if username and '%' not in username:
+                    win_chrome = Path(f'/mnt/c/Users/{username}/AppData/Local/Google/Chrome/User Data')
+                    if win_chrome.exists():
+                        return win_chrome
+            except Exception:
+                pass
         return home / '.config/google-chrome'
     elif system == 'Windows' or 'microsoft' in _read_proc_version():
         local_app_data = os.environ.get('LOCALAPPDATA', '')
